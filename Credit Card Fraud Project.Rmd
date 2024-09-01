@@ -1,0 +1,373 @@
+---
+title: "Credit Card Fraud Prediction"
+author: "Philip Kim"
+date: "2/21/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading in required libraries
+```{r}
+library(ggplot2)
+library(corrplot) # correlation heatmap
+library(knitr) #
+library(caTools) # train/test split
+library(moments) # to calculate skewness
+library(ggpubr) #stat_cor
+library(gridExtra) 
+library(class) #knn
+library(caret) # train()
+library(randomForest)
+library(dplyr)
+```
+
+
+
+Removing all variables from the environment
+```{r}
+rm(list = ls())
+```
+
+
+Reading in the credit card dataset
+```{r}
+credit <- read.csv('card_transdata.csv', header = T, sep = ",")
+
+# cut the data down into 1000 observations so we can actually run the models (too much time to run)
+credit <- credit[sample(nrow(credit), 10000, replace = FALSE), ]
+
+```
+
+Checking for missing values
+```{r}
+sum(is.na(credit))
+```
+
+
+
+```{r}
+credit %>%
+  count(fraud == 1)
+# data set is unbalanced, there are many more instances of no fraud
+```
+
+# Exploratory Data Analysis (EDA)
+
+Barplot of Response
+```{r}
+credit %>%
+  ggplot(aes(x = as.factor(fraud), fill = as.factor(fraud))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set2") +  
+  labs(title = 'Number of Cases of Fraud vs Legitimate Transactions', x = 'Fraud', y = 'Count', fill = 'Legitimate/Fraudulent') +
+  scale_x_discrete(labels = c('0' = 'Legitimate', '1' = 'Fraudulent'))
+
+# Proportion of cases that are fraudulent
+prop_fraud <- sum(credit$fraud == 0) / nrow(credit)
+cat('Proportion of Cases that are Fraudulent:', prop_fraud, '-->', round(prop_fraud*100,2), '%')
+```
+
+
+Correlation Heatmap
+```{r}
+# This should give us a good idea on what variables we should investigate
+
+cor_df <- credit
+cor_df$distance_from_home <- log(credit$distance_from_home)
+cor_df$distance_from_home <- log(credit$distance_from_last_transaction)
+cor_df$distance_from_home <- log(credit$ratio_to_median_purchase_price)
+cor_mat <- round(cor(cor_df), 2)
+
+corrplot(cor_mat, method = 'number', type = 'lower', diag = F, tl.cex = 0.5, tl.col = 'black',
+         tl.srt = 45, addgrid.col = 'gray')
+
+plot(cor_df$distance_from_home, cor_df$ratio_to_median_purchase_price)
+```
+
+```{r}
+# dont see too much in this scatter plot, but we see a slight increase in frauds as ratio increases
+
+credit %>%
+  ggplot(aes(x = ratio_to_median_purchase_price, y = as.factor(fraud))) +
+  geom_point() +
+  labs(title = 'Fraud and Purchase Price to Median Transaction Price', x = "Purchase Price to Median Transaction Price", y = "Fraud")
+
+# Transformed Ratio Scatterplot
+credit %>%
+  ggplot(aes(x = log(ratio_to_median_purchase_price), y = (fraud))) +
+  geom_point(color = 'black') +
+  geom_smooth(method = 'lm', alpha = 0.1) +
+  stat_cor(method = "pearson", position = 'jitter') +
+  labs(title = 'Natural Log of Purchase Price to Median Purchase and Fraud', 
+       x = 'Natural Log of Purchase Price to Median Purchase Price', y = 'Fraud')
+
+summary(credit$ratio_to_median_purchase_price)
+summary(log(credit$ratio_to_median_purchase_price))
+
+cat('Skewness of Amount Ratio:', skewness(credit$ratio_to_median_purchase_price), "\n")
+cat('Skewness of Log of Amount Ratio:', skewness(log(credit$ratio_to_median_purchase_price)), "\n")
+
+```
+
+Distribution of Distance from Home
+```{r}
+
+# un-transformed histogram
+credit %>%
+  ggplot(aes(x = distance_from_home)) +
+  geom_histogram(fill = 'light green', color = 'black') +
+  labs(title = 'Distribution of Distance From Home', x = 'Distance From Home', y = 'Count')
+
+
+# natural log transformation 
+credit %>%
+  ggplot(aes(x = log(distance_from_home))) +
+  geom_histogram(fill = 'gray', color = 'black')  +
+  labs(title = 'Distribution of Natural Log of Distance From Home', x = 'Natural Log of Distance From Home', y = 'Count')
+
+summary(credit$distance_from_home)
+summary(log(credit$distance_from_home))
+
+cat('Skewness of Untransformed Distance from Home:', skewness(credit$distance_from_home), "\n")
+cat('Skewness of Log of Distance from Home:', skewness(log(credit$distance_from_home)), "\n")
+
+```
+
+
+Distance from Last Transaction
+```{r}
+summary(credit$distance_from_last_transaction)
+summary(log(credit$distance_from_last_transaction))
+
+credit %>%
+  ggplot(aes(x = as.factor(fraud), y = distance_from_last_transaction, fill = as.factor(fraud))) +
+  geom_boxplot()
+
+credit %>%
+  ggplot(aes(x = as.factor(fraud), y = log(distance_from_last_transaction), fill = as.factor(fraud))) +
+  geom_boxplot(fill = 'gray') +
+  labs(title = 'Boxplot of Log of Distance from Last Transaction', x = 'Fraud', y = 'Log of Distance from Last Transaction')
+
+
+cat('Skewness of Untransformed Distance from Last Transaction:', skewness(credit$distance_from_last_transaction), "\n")
+cat('Skewness of Log of Distance from Last Transaction:', skewness(log(credit$distance_from_last_transaction)), "\n")
+
+```
+
+
+Repeat Retailer
+```{r}
+a <- credit %>%
+  ggplot(aes(x = as.factor(fraud), fill = as.factor(repeat_retailer))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set2") +  
+  labs(title = 'Repeat Retailer', x = 'Fraud', y = 'Count', fill = "Repeat Retailer") +
+  scale_x_discrete(labels = c("0" = "Legitimate", "1" = "Fraudulent"))
+
+# out of the legitimate transactions, what proportion was with a repeat retailer
+sum(credit$fraud == 0 & credit$repeat_retailer == 1) / sum(credit$fraud == 0)
+
+# out of the fraudulent transactions, what proportion was with a repeat retailer
+sum(credit$fraud == 1 & credit$repeat_retailer == 1) / sum(credit$fraud == 1)
+
+
+# No difference in proportions 
+```
+
+
+Used Chip
+```{r}
+b <- credit %>%
+  ggplot(aes(x = as.factor(fraud), fill = as.factor(used_chip))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set1") +  
+  labs(title = 'Used Chip', x = 'Fraud', y = 'Count', fill = "Used Chip") +
+  scale_x_discrete(labels = c("0" = "Legitimate", "1" = "Fraudulent"))
+
+# used chip for legitimate
+sum(credit$fraud == 0 & credit$used_chip == 1) / sum(credit$fraud == 0)
+
+# used chip for fraudulent
+sum(credit$fraud == 1 & credit$used_chip == 1) / sum(credit$fraud == 1)
+
+# Fraudsters are more hesitant to use chips for fraudulent transactions (chip transactions may require a signature or PIN from the user, and chips offer more security in general than the magnetic stripe)
+```
+
+Used PIN Number
+```{r}
+c <- credit %>%
+  ggplot(aes(x = as.factor(fraud), fill = as.factor(used_pin_number))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Pastel1") +  
+  labs(title = 'Used PIN Number', x = 'Fraud', y = 'Count', fill = "Used PIN Number") +
+  scale_x_discrete(labels = c("0" = "Legitimate", "1" = "Fraudulent"))
+
+# used chip for legitimate
+sum(credit$fraud == 0 & credit$used_pin_number == 1) / sum(credit$fraud == 0)
+
+# used chip for fraudulent
+sum(credit$fraud == 1 & credit$used_pin_number == 1) / sum(credit$fraud == 1)
+
+# Fraudsters are more hesitant to use PIN number due to a higher risk of detection, and PIN numbers are very hard for fraudsters to obtain because it can't be obtained with data breaches or skimming devices
+```
+
+
+
+
+Online Order
+```{r}
+d <- credit %>%
+  ggplot(aes(x = as.factor(fraud), fill = as.factor(online_order))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Paired") +  
+  labs(title = 'Online Orders', x = 'Fraud', y = 'Count', fill = "Online Order") +
+  scale_x_discrete(labels = c("0" = "Legitimate", "1" = "Fraudulent"))
+
+# used chip for legitimate
+sum(credit$fraud == 0 & credit$online_order == 1) / sum(credit$fraud == 0)
+
+# used chip for fraudulent
+sum(credit$fraud == 1 & credit$online_order == 1) / sum(credit$fraud == 1)
+
+# Fraudsters complete almost all of their transactions online
+```
+
+```{r}
+par(mfrow = c(2,2))
+a
+b
+c
+d
+grid.arrange(a,b,c,d, ncol = 2)
+```
+
+
+
+
+
+
+
+# Modeling
+
+## Logistic Regression
+```{r}
+set.seed(123)
+# Train and test split
+sample <- sample.split(credit$fraud, SplitRatio = 0.8)
+train <- subset(credit, sample == T)
+test <- subset(credit, sample == F)
+
+
+# Fitting logistic regression model
+log_fit <- glm(data = train, fraud ~ log(distance_from_home) + log(distance_from_last_transaction) +
+                 log(ratio_to_median_purchase_price) + as.factor(repeat_retailer) + as.factor(used_chip) +
+                 as.factor(used_pin_number) + as.factor(online_order), family = binomial)
+summary(log_fit)
+pred <- predict(log_fit, newdata = test, type = 'response')
+predicted_class <- ifelse(pred > 0.5, 1, 0)
+misclass_rate <- mean(predicted_class != test$fraud)
+cat("Misclassification Rate:", misclass_rate, "\n")
+
+# Accuracy Heatmap
+conf_matrix <- table(predicted_class, test$fraud)
+conf_df <- as.data.frame.matrix(conf_matrix)
+conf_df$predicted_class <- rownames(conf_df)
+conf_df_long <- reshape2::melt(conf_df, id.vars = "predicted_class")
+
+ggplot(conf_df_long, aes(x = predicted_class, y = variable, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "light blue", high = "blue") +
+  geom_text(aes(label = value), color = "black") +
+  labs(x = "Predicted Class", y = "Actual Class", fill = "Frequency", 
+       title = "Accuracy Heatmap for Logistic Regression") +
+  theme_minimal() +
+  scale_x_discrete(labels = c('0' = 'Legitimate', '1' = 'Fraudulent')) + 
+  scale_y_discrete(labels= c('0' = 'Legitimate', '1' = 'Fraudulent'))
+
+# Calculate the Accuracy and Misclassification Rate
+cat('Logistic Regression Accuracy:', round(((conf_matrix[1] + conf_matrix[4]) / sum(conf_matrix) * 100),2), "%", "\n")
+cat('Logistic Regression Misclassification Rate:', 
+    round(((conf_matrix[2] + conf_matrix[3]) / sum(conf_matrix) * 100),2), "%")
+```
+
+
+
+## kNN
+```{r}
+
+set.seed(123)
+
+x_train <- train[-8]
+y_train <- train['fraud']
+x_test <- test[-8]
+y_test <- test['fraud']
+
+
+# 10-fold cross validation for k = 1-10
+trControl <- trainControl(method = 'cv', number = 5)
+knn_cv <- train(x = x_train, y = as.factor(y_train$fraud), method = 'knn', tuneGrid = expand.grid(k = 1:10),
+                 trControl = trControl, preProcess = c("center", "scale"))
+
+knn_results <- knn_cv$results
+plot(knn_cv)
+
+# best k value
+best_k <- which.max(knn_results$Accuracy)
+
+# fitting the knn model using the best k
+knn_fit <- knn(x_train, x_test, cl = as.factor(y_train$fraud), k = best_k)
+
+# confusion matrix and diagnostics
+knn_conf_matrix <- table(knn_fit, as.factor(y_test$fraud))
+cat('kNN Accuracy:', round(((knn_conf_matrix[1] + knn_conf_matrix[4]) / sum(knn_conf_matrix) * 100),2), "%", "\n")
+cat('kNN Misclassification Rate:', 
+    round(((knn_conf_matrix[2] + knn_conf_matrix[3]) / sum(knn_conf_matrix) * 100),2), "%")
+```
+
+
+
+## Random Forest
+```{r}
+
+set.seed(123)
+
+trControl_rf <- trainControl(method = 'cv', number = 5)
+
+mtry_grid <- expand.grid(mtry = seq(1:length(train)-1)) # controls number of mtry to consider for the CV
+rf_model <- train(x = x_train, y = as.factor(y_train$fraud), method = 'rf', 
+                  tuneGrid = mtry_grid, trControl = trControl_rf)
+                                                                                                                    rf_results <- rf_model$results
+                                                                                                                      
+best_mtry <- which.max(rf_results$Accuracy)   
+
+rf_fit <- randomForest(as.factor(fraud) ~., data = train, mtry = 2, ntree = 100, importance = TRUE)
+
+rf_pred <- predict(rf_fit, x_test)
+
+varImpPlot(rf_fit)
+varimp <- varImp(rf_fit) %>%
+  dplyr::arrange(desc(varimp$'1'))
+
+varimp
+
+rf_conf_matrix <- table(rf_pred, as.factor(y_test$fraud))
+cat('RF Accuracy:', round(((rf_conf_matrix[1] + rf_conf_matrix[4]) / sum(rf_conf_matrix) * 100),2), "%", "\n")
+cat('RF Misclassification Rate:', 
+    round(((rf_conf_matrix[2] + rf_conf_matrix[3]) / sum(rf_conf_matrix) * 100),2), "%")
+
+
+```
+
+
+
+
+
+
+
+
+
+
